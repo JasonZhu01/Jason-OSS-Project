@@ -113,7 +113,7 @@ class GraphPartition(object):
                 'execution_relations': execution_relations}
     
     def _get_execution_info_for_all(self):
-        """Step 1: get the execution info, including the placeholder inputs and the execution relations"""
+        """Get the execution info, including the placeholder inputs and the execution relations"""
         self.op_to_execution_info = {}
         
         for op, graph_def in self.op_to_graph_def.items():
@@ -121,59 +121,46 @@ class GraphPartition(object):
         
     
     def _check_remote_op(self, node_name):
-        return bool(sum([node_name.startswith(prefix) for prefix in self.op_to_graph_def.keys()]))
+        return bool(sum([node_name.startswith(prefix) for prefix in self.op_to_graph_def]))
     
     def _create_placeholder_node(self, dtype, shape, name):
         temp = tf.Graph()
         with temp.as_default():
             placeholder = tf.compat.v1.placeholder(dtype=dtype, shape=shape, name=name)
-            return temp.as_graph_def().node[0]
-        
-        
-    def experiment(self):
-        graph_def = list(self.op_to_graph_def.values())[0]
-        
-        temp = tf.Graph()
-        with temp.as_default():
-            tf.import_graph_def(graph_def)
-            graph = tf.compat.v1.get_default_graph()
-            print(type(graph.get_operations()[6].inputs[0].dtype))
+            return temp.as_graph_def().node[0]      # The first and the only node
             
-            op = tf.Operation()
-            op
-            tensor = tf.Tensor()
-            tensor
-            
-            
-    """Cautious: removing colocated attrs may be a horrible idea"""
+    """Cautious!
+           Reason: removing colocated attr allows the partitioned graph under 
+                   the op-level decomposition to work.
+           Concern: not sure about the potential impacts."""
     def _remove_colocated_attr(self, node):
         if '_class' in node.attr:
             del node.attr['_class']
-            
         return node
-        
     
+    def _remove_prefix_postfix(self, node_name):
+        """Remove the prefix "import/" and the postfix ":0" """
+        return node_name[7:-2]
+        
     def _create_graphdef_for_a_node(self, graph, node, versions, library):
+        """Create a partitioned graphdef for a node"""
         graph_def = graph_pb2.GraphDef()
         graph_def.versions.CopyFrom(versions)
         graph_def.library.CopyFrom(library)
         
-        """Cautious"""
-        node = self._remove_colocated_attr(node)
+        node = self._remove_colocated_attr(node) 
         
         current_node = graph.get_operation_by_name('import/%s' % (node.name))
-        
-        for node_input in current_node.inputs:
-            graph_def.node.append(self._create_placeholder_node(dtype=node_input.dtype,
+        # Here, we add the input nodes as placeholder nodes into the subgraph
+        for input_node in current_node.inputs:
+            graph_def.node.append(self._create_placeholder_node(dtype=input_node.dtype,
                                                                 shape=None,
-                                                                name=node_input.name[7:-2]))  
-            # "import/name:0", we don't want the prefix "import/" and the postfix ":0", so [7:-2]
+                                                                name=self._remove_prefix_postfix(input_node.name)))  
         graph_def.node.append(node)
-            
         return graph_def
                 
-    
-    def _create_graphdefs_for_a_graph(self, graph, graph_def):
+    def _create_graphdefs_for_a_graph(self, graph_def, graph):
+        """Create partitioned graphdefs for a graph"""
         node_to_graph_def = {}
         for node in graph_def.node:
             node_to_graph_def[node.name] = self._create_graphdef_for_a_node(graph,
@@ -182,27 +169,27 @@ class GraphPartition(object):
                                                                             graph_def.library)
         return node_to_graph_def
     
-    
     def _create_graphdefs_for_all(self):
-        """Step 3: Partition the graph/subgraphs"""  
+        """Partition all the graphs"""
         self.op_to_partitioned_graph = {}
         
         for op in self.op_to_graph_def:
-            graph = self.op_to_graph[op]
             graph_def = self.op_to_graph_def[op]
+            graph = self.op_to_graph[op]
             
-            self.op_to_partitioned_graph[op] = self._create_graphdefs_for_a_graph(graph, graph_def)
+            self.op_to_partitioned_graph[op] = self._create_graphdefs_for_a_graph(graph_def, graph)
                  
     
     def _save_partitioned_results(self, path):
-        """Step 4: Save results into files"""
+        """---DEVELOPING---
+           Save results into files"""
         for op, partitioned_graph in self.op_to_partitioned_graph.items():
             
             for node_name, partitioned_subgraph in partitioned_graph.items():
                 node_name = node_name.replace('/', '-')
                 print(node_name)
                 logdir = '%s/partition/%s/' % (path, op)
-                tf.io.write_graph(partitioned_subgraph, logdir, node_name + '.pb', as_text=False)
+                tf.io.write_graph(partitioned_subgraph, logdir, '%s.pb' % node_name, as_text=False)
         
 
 class BeamSubgraph(beam.DoFn):    
