@@ -49,7 +49,8 @@ class GraphPartition(object):
         ***Definition: op = graph names = {'main', 'remote_op_a', 'remote_op_b'} in our example***
         op_to_graph_def: {graph name: graph_def}
         op_to_graph: {graph name: graph}
-        
+        op_to_execution_relations:
+        op_to_partitioned_graph:
     
     """
     
@@ -77,66 +78,38 @@ class GraphPartition(object):
             return tf.compat.v1.get_default_graph()
     
     def partition(self):
-        """Perform graph partitioning by calling the member methods"""
-        # Stage 1
-        self._get_file_relations()
-        print(self.file_relations)
-        
-        # Stage 2
+        """Perform graph partitioning"""
         self._get_execution_relations_for_all()
-        print(self.op_to_execution_relations)
-        
-        # Stage 3
         self._create_graphdefs_for_all()
+        
+    def show_info(self):
+        """Show the attributes after the partitioning"""
+        for op, execution_relations in self.op_to_execution_relations.items():
+            print('%s\n%s' % (op, execution_relations))
+        
         for op, partitioned_graph in self.op_to_partitioned_graph.items():
-            
+            print('%s:' % op)
             for node_name, partitioned_subgraph in partitioned_graph.items():
                 print(node_name)
-#                print(partitioned_subgraph)
-            
-        
-    def _get_file_relations(self):
-        """Stage 1: traverse the graphs to gather relations"""
-        self.file_relations = {}
-        
-        for op, graph_def in self.op_to_graph_def.items():
-            self.file_relations[op] = set([])
-            
-            for node in graph_def.node:
-                # For repeated ops, we'd like to have remote_op_a instead of remote_op_a_1
-                if node.name in self.op_to_graph_def.keys():
-                    self.file_relations[op].add(node.name)
-    
     
     def _check_remote_op(self, node_name):
         return bool(sum([node_name.startswith(prefix) for prefix in self.op_to_graph_def.keys()]))
     
-    
-    def _check_input_op(self, node):
-        return node.input == []
-    
-    
     def _check_input_placeholder_op(self, node):
         return node.op == "Placeholder"
     
-    
     def _get_execution_relations_for_one_graph(self, graph_def):
-        """Get graph inputs and execution relations of a graph"""
-        """Why list instead of set? Preserve the order of placeholder nodes"""
-        graph_inputs = []
+        """Get the placeholder inputs and the execution relations of a graph"""
         graph_placeholder_inputs = []
         execution_relations = {}
         
         for node in graph_def.node:
-            if self._check_input_op(node):
-                graph_inputs.append(node.name)
-                if self._check_input_placeholder_op(node):
-                    graph_placeholder_inputs.append(node.name)
+            if self._check_input_placeholder_op(node):
+                graph_placeholder_inputs.append(node.name)
             
             execution_relations[node.name] = list(node.input)       # converts repeated to list
                 
-        return {'graph_inputs': graph_inputs,
-                'graph_placeholder_inputs': graph_placeholder_inputs,
+        return {'graph_placeholder_inputs': graph_placeholder_inputs,
                 'execution_relations': execution_relations}
     
     
@@ -186,17 +159,14 @@ class GraphPartition(object):
         """Cautious"""
         node = self._remove_colocated_attr(node)
         
-        if self._check_input_op(node):
-            graph_def.node.append(node)
-        else:
-            current_node = graph.get_operation_by_name('import/%s' % (node.name))
-            
-            for node_input in current_node.inputs:
-                graph_def.node.append(self._create_placeholder_node(dtype=node_input.dtype,
-                                                                    shape=None,
-                                                                    name=node_input.name[7:-2]))  
-                # "import/name:0", we don't want the prefix "import/" and the postfix ":0", so [7:-2]
-            graph_def.node.append(node)
+        current_node = graph.get_operation_by_name('import/%s' % (node.name))
+        
+        for node_input in current_node.inputs:
+            graph_def.node.append(self._create_placeholder_node(dtype=node_input.dtype,
+                                                                shape=None,
+                                                                name=node_input.name[7:-2]))  
+            # "import/name:0", we don't want the prefix "import/" and the postfix ":0", so [7:-2]
+        graph_def.node.append(node)
             
         return graph_def
                 
@@ -314,7 +284,7 @@ def BeamGraph(pcoll, op_to_partitioned_graph, op_to_execution_relations, graph_n
     Inputs:
         pcoll: input PCollection, {graph_name: {tensors ready to use}}
         op_to_partitioned_graph: {graph_name: {node_name: subgraph}}
-        op_to_execution_relations: {graph_name: {'graph_inputs': a list, 'graph_placeholder_inputs': a list,
+        op_to_execution_relations: {graph_name: {'graph_placeholder_inputs': a list,
                                                  'execution_relations': {node_name: a list of input_names}}}
         graph_name: which graph am I currently executing
         feed_dict: {graph_name: {remote op name: {placeholder name inside subgraph: input name}}}
@@ -443,7 +413,7 @@ def TEST_Partitioning():
     partition.partition()
     
     test = Relations(partition.op_to_execution_relations['remote_op_b']['execution_relations'],
-                     partition.op_to_execution_relations['remote_op_b']['graph_inputs'])
+                     partition.op_to_execution_relations['remote_op_b']['graph_placeholder_inputs'])
     test.check()
 
     
