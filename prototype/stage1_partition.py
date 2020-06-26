@@ -49,7 +49,8 @@ class GraphPartition(object):
         ***Definition: op = graph names = {'main', 'remote_op_a', 'remote_op_b'} in our example***
         op_to_graph_def: {graph name: graph_def}
         op_to_graph: {graph name: graph}
-        op_to_execution_relations:
+        op_to_execution_info: {graph name: {'graph_placeholder_inputs': a list of node names},
+                                            'execution relations': {node name: a list of node names}}
         op_to_partitioned_graph:
     
     """
@@ -77,14 +78,15 @@ class GraphPartition(object):
             tf.import_graph_def(graph_def)
             return tf.compat.v1.get_default_graph()
     
+    
     def partition(self):
         """Perform graph partitioning"""
-        self._get_execution_relations_for_all()
+        self._get_execution_info_for_all()
         self._create_graphdefs_for_all()
         
     def show_info(self):
         """Show the attributes after the partitioning"""
-        for op, execution_relations in self.op_to_execution_relations.items():
+        for op, execution_relations in self.op_to_execution_info.items():
             print('%s\n%s' % (op, execution_relations))
         
         for op, partitioned_graph in self.op_to_partitioned_graph.items():
@@ -92,14 +94,12 @@ class GraphPartition(object):
             for node_name, partitioned_subgraph in partitioned_graph.items():
                 print(node_name)
     
-    def _check_remote_op(self, node_name):
-        return bool(sum([node_name.startswith(prefix) for prefix in self.op_to_graph_def.keys()]))
     
     def _check_input_placeholder_op(self, node):
         return node.op == "Placeholder"
     
-    def _get_execution_relations_for_one_graph(self, graph_def):
-        """Get the placeholder inputs and the execution relations of a graph"""
+    def _get_execution_info_for_one_graph(self, graph_def):
+        """Get the placeholder inputs and the execution info of a graph"""
         graph_placeholder_inputs = []
         execution_relations = {}
         
@@ -107,19 +107,21 @@ class GraphPartition(object):
             if self._check_input_placeholder_op(node):
                 graph_placeholder_inputs.append(node.name)
             
-            execution_relations[node.name] = list(node.input)       # converts repeated to list
+            execution_relations[node.name] = list(node.input)       # converts proto-repeated to list
                 
         return {'graph_placeholder_inputs': graph_placeholder_inputs,
                 'execution_relations': execution_relations}
     
-    
-    def _get_execution_relations_for_all(self):
-        """Step 2: get the execution relations"""
-        self.op_to_execution_relations = {}
+    def _get_execution_info_for_all(self):
+        """Step 1: get the execution info, including the placeholder inputs and the execution relations"""
+        self.op_to_execution_info = {}
         
         for op, graph_def in self.op_to_graph_def.items():
-            self.op_to_execution_relations[op] = self._get_execution_relations_for_one_graph(graph_def)
+            self.op_to_execution_info[op] = self._get_execution_info_for_one_graph(graph_def)
         
+    
+    def _check_remote_op(self, node_name):
+        return bool(sum([node_name.startswith(prefix) for prefix in self.op_to_graph_def.keys()]))
     
     def _create_placeholder_node(self, dtype, shape, name):
         temp = tf.Graph()
@@ -278,13 +280,13 @@ class Relations:
 
 
 @beam.ptransform_fn
-def BeamGraph(pcoll, op_to_partitioned_graph, op_to_execution_relations, graph_name, feed_dict, op_to_outputs):
+def BeamGraph(pcoll, op_to_partitioned_graph, op_to_execution_info, graph_name, feed_dict, op_to_outputs):
     """
     Assume the parent graph has set up the placeholder values for me
     Inputs:
         pcoll: input PCollection, {graph_name: {tensors ready to use}}
         op_to_partitioned_graph: {graph_name: {node_name: subgraph}}
-        op_to_execution_relations: {graph_name: {'graph_placeholder_inputs': a list,
+        op_to_execution_info: {graph_name: {'graph_placeholder_inputs': a list,
                                                  'execution_relations': {node_name: a list of input_names}}}
         graph_name: which graph am I currently executing
         feed_dict: {graph_name: {remote op name: {placeholder name inside subgraph: input name}}}
@@ -297,11 +299,11 @@ def BeamGraph(pcoll, op_to_partitioned_graph, op_to_execution_relations, graph_n
             
     
     partitioned_graph = op_to_partitioned_graph[_get_op_type(graph_name)]
-    execution_relations = op_to_execution_relations[_get_op_type(graph_name)]
+    execution_info = op_to_execution_info[_get_op_type(graph_name)]
     
-    relations = Relations(execution_relations['execution_relations'],
-                          execution_relations['graph_placeholder_inputs'])
-    execution_relations = execution_relations['execution_relations']
+    relations = Relations(execution_info['execution_relations'],
+                          execution_info['graph_placeholder_inputs'])
+    execution_relations = execution_info['execution_relations']
     
     count = 0
     
@@ -352,7 +354,7 @@ def BeamGraph(pcoll, op_to_partitioned_graph, op_to_execution_relations, graph_n
             remote_graph_name = current_node_name
             
             input_names = execution_relations[current_node_name]
-            remote_graph_placeholder_names = op_to_execution_relations[_get_op_type(remote_graph_name)]['graph_placeholder_inputs']
+            remote_graph_placeholder_names = op_to_execution_info[_get_op_type(remote_graph_name)]['graph_placeholder_inputs']
             placeholder_name_to_input_name = feed_dict[current_graph_name][remote_graph_name]
             
             assert set(input_names) == set(placeholder_name_to_input_name.values())
@@ -371,7 +373,7 @@ def BeamGraph(pcoll, op_to_partitioned_graph, op_to_execution_relations, graph_n
             
             """Recurse"""
             count += 1
-            pcoll = pcoll | str(count) >> BeamGraph(op_to_partitioned_graph, op_to_execution_relations,
+            pcoll = pcoll | str(count) >> BeamGraph(op_to_partitioned_graph, op_to_execution_info,
                                                     remote_graph_name, feed_dict, op_to_outputs)
             
             """Get the output"""
@@ -401,7 +403,7 @@ def TEST_Partitioning():
     partition = GraphPartition(op_to_filename)
     
     print(partition._check_remote_op('remote_op_a_3'))
-    partition._get_execution_relations_for_all()
+    partition._get_execution_info_for_all()
     
     print(partition._create_placeholder_node(tf.int16, None, 'test'))
     partition._create_graphdefs_for_all()
@@ -412,8 +414,8 @@ def TEST_Partitioning():
     partition = GraphPartition(op_to_filename)
     partition.partition()
     
-    test = Relations(partition.op_to_execution_relations['remote_op_b']['execution_relations'],
-                     partition.op_to_execution_relations['remote_op_b']['graph_placeholder_inputs'])
+    test = Relations(partition.op_to_execution_info['remote_op_b']['execution_relations'],
+                     partition.op_to_execution_info['remote_op_b']['graph_placeholder_inputs'])
     test.check()
 
     
@@ -472,7 +474,7 @@ def TEST_BeamGraph_Graph_A():
     
         test | 'start' >> beam.Map(print)
     
-        output = test | 'Graph' >> BeamGraph(partition.op_to_partitioned_graph, partition.op_to_execution_relations, 
+        output = test | 'Graph' >> BeamGraph(partition.op_to_partitioned_graph, partition.op_to_execution_info, 
                                              graph_name, {'remote_op_a': {}}, {'remote_op_a': {}})
         
         class PrintOne(beam.DoFn):
@@ -515,7 +517,7 @@ def TEST_BeamGraph_B():
         
         test | 'start' >> beam.Map(print)
     
-        output = test | 'Graph' >> BeamGraph(partition.op_to_partitioned_graph, partition.op_to_execution_relations, 
+        output = test | 'Graph' >> BeamGraph(partition.op_to_partitioned_graph, partition.op_to_execution_info, 
                                              graph_name, feed_dict, op_to_outputs)
         
         class GetOutput(beam.DoFn):
@@ -566,7 +568,7 @@ def TEST_BeamGraph_Main():
         
         test | 'start' >> beam.Map(print)
     
-        output = test | 'Graph' >> BeamGraph(partition.op_to_partitioned_graph, partition.op_to_execution_relations, 
+        output = test | 'Graph' >> BeamGraph(partition.op_to_partitioned_graph, partition.op_to_execution_info, 
                                              graph_name, feed_dict, op_to_outputs)
         
         class GetOutput(beam.DoFn):
