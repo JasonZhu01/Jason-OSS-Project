@@ -1,0 +1,231 @@
+node {
+  name: "ids1"
+  op: "Placeholder"
+  attr {
+    key: "dtype"
+    value {
+      type: DT_INT32
+    }
+  }
+  attr {
+    key: "shape"
+    value {
+      shape {
+        unknown_rank: true
+      }
+    }
+  }
+}
+node {
+  name: "ids2"
+  op: "Placeholder"
+  attr {
+    key: "dtype"
+    value {
+      type: DT_INT32
+    }
+  }
+  attr {
+    key: "shape"
+    value {
+      shape {
+        unknown_rank: true
+      }
+    }
+  }
+}
+node {
+  name: "remote_op_b"
+  op: "PyFunc"
+  input: "ids1"
+  input: "ids2"
+  attr {
+    key: "Tin"
+    value {
+      list {
+        type: DT_INT32
+        type: DT_INT32
+      }
+    }
+  }
+  attr {
+    key: "Tout"
+    value {
+      list {
+        type: DT_FLOAT
+      }
+    }
+  }
+  attr {
+    key: "token"
+    value {
+      s: "pyfunc_2"
+    }
+  }
+}
+node {
+  name: "remote_op_a"
+  op: "PyFunc"
+  input: "ids1"
+  attr {
+    key: "Tin"
+    value {
+      list {
+        type: DT_INT32
+      }
+    }
+  }
+  attr {
+    key: "Tout"
+    value {
+      list {
+        type: DT_FLOAT
+      }
+    }
+  }
+  attr {
+    key: "token"
+    value {
+      s: "pyfunc_3"
+    }
+  }
+}
+node {
+  name: "concat/axis"
+  op: "Const"
+  attr {
+    key: "dtype"
+    value {
+      type: DT_INT32
+    }
+  }
+  attr {
+    key: "value"
+    value {
+      tensor {
+        dtype: DT_INT32
+        tensor_shape {
+        }
+        int_val: 0
+      }
+    }
+  }
+}
+node {
+  name: "concat"
+  op: "ConcatV2"
+  input: "remote_op_a"
+  input: "remote_op_b"
+  input: "concat/axis"
+  attr {
+    key: "N"
+    value {
+      i: 2
+    }
+  }
+  attr {
+    key: "T"
+    value {
+      type: DT_FLOAT
+    }
+  }
+  attr {
+    key: "Tidx"
+    value {
+      type: DT_INT32
+    }
+  }
+}
+node {
+  name: "Rank"
+  op: "Rank"
+  input: "concat"
+  attr {
+    key: "T"
+    value {
+      type: DT_FLOAT
+    }
+  }
+}
+node {
+  name: "range/start"
+  op: "Const"
+  attr {
+    key: "dtype"
+    value {
+      type: DT_INT32
+    }
+  }
+  attr {
+    key: "value"
+    value {
+      tensor {
+        dtype: DT_INT32
+        tensor_shape {
+        }
+        int_val: 0
+      }
+    }
+  }
+}
+node {
+  name: "range/delta"
+  op: "Const"
+  attr {
+    key: "dtype"
+    value {
+      type: DT_INT32
+    }
+  }
+  attr {
+    key: "value"
+    value {
+      tensor {
+        dtype: DT_INT32
+        tensor_shape {
+        }
+        int_val: 1
+      }
+    }
+  }
+}
+node {
+  name: "range"
+  op: "Range"
+  input: "range/start"
+  input: "Rank"
+  input: "range/delta"
+  attr {
+    key: "Tidx"
+    value {
+      type: DT_INT32
+    }
+  }
+}
+node {
+  name: "Mean"
+  op: "Mean"
+  input: "concat"
+  input: "range"
+  attr {
+    key: "T"
+    value {
+      type: DT_FLOAT
+    }
+  }
+  attr {
+    key: "Tidx"
+    value {
+      type: DT_INT32
+    }
+  }
+  attr {
+    key: "keep_dims"
+    value {
+      b: false
+    }
+  }
+}
+versions {
+  producer: 175
+}
