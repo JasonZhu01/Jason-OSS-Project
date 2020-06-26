@@ -80,49 +80,19 @@ with main_graph.as_default():
     main_result = tf.reduce_mean(result)
 
 
-
 def main():
     with create_session(main_graph) as sess:
         input1 = np.random.uniform(0, N, (10))
         input2 = np.random.uniform(0, N, (10))
-        print(sess.run([res_b], feed_dict={ids1: 3, ids2: 3}))
-        print(sess.graph.get_operations()[5].inputs)
+        print(sess.run([res_b], feed_dict={ids1: input1, ids2: input2}))
         
-    tf.io.write_graph(graph_a.as_graph_def(), './graphdefs', 'graph_a.pbtxt', as_text=True)
-    tf.io.write_graph(graph_b.as_graph_def(), './graphdefs', 'graph_b.pbtxt', as_text=True)
-    tf.io.write_graph(main_graph.as_graph_def(), './graphdefs', 'main_graph.pbtxt', as_text=True)
+    tf.io.write_graph(graph_a.as_graph_def(), './graphdefs', 'graph_a.pb', as_text=False)
+    tf.io.write_graph(graph_b.as_graph_def(), './graphdefs', 'graph_b.pb', as_text=False)
+    tf.io.write_graph(main_graph.as_graph_def(), './graphdefs', 'main_graph.pb', as_text=False)
 
     
 if __name__ == "__main__":
     main()
-    
-    with create_session(graph_b) as sess:
-        print(sess.run([remote_result_a1, remote_result_a2], feed_dict={ids_b1: 3, ids_b2: 3}))
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 

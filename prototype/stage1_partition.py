@@ -89,15 +89,15 @@ class GraphPartition(object):
         self._get_execution_info_for_all()
         self._create_graphdefs_for_all()
         
-    def show_info(self):
+    def TEST(self):
         """Show the attributes after the partitioning"""
         for op, execution_relations in self.op_to_execution_info.items():
             print('%s\n%s' % (op, execution_relations))
         
-        for op, partitioned_graph in self.op_to_partitioned_graph.items():
-            print('%s:' % op)
-            for node_name, partitioned_subgraph in partitioned_graph.items():
-                print(node_name)
+#        for op, partitioned_graph in self.op_to_partitioned_graph.items():
+#            print('%s:' % op)
+#            for node_name, partitioned_subgraph in partitioned_graph.items():
+#                print(node_name)
     
     
     def _check_input_placeholder_op(self, node):
@@ -284,29 +284,48 @@ class Relations:
         return None
     
     def TEST(self):
-        print(self.relations, self.to_be_processed, self.processed)
+        print('\nRelations:', self.relations)
+        print('\nProcessed:', self.processed)
+        print('\nTo be processed:', self.to_be_processed)
+        print('\nExecution Order:')
         for i in range(len(self.to_be_processed)):
             print(self.find_next())
             
 
 @beam.ptransform_fn
-def BeamGraph(pcoll, op_to_partitioned_graph, op_to_execution_info, graph_name, feed_dict, op_to_outputs):
-    """
-    Assume the parent graph has set up the placeholder values for me
-    Inputs:
-        pcoll: input PCollection, {graph_name: {tensors ready to use}}
-        op_to_partitioned_graph: {graph_name: {node_name: subgraph}}
+def BeamGraph(pcoll, 
+              op_to_partitioned_graph, 
+              op_to_execution_info, 
+              op_to_remote_op_name_mapping, 
+              op_to_output,
+              graph_name):
+    """Compute one graph, for example remote_op_b's graph.
+    
+    Here, we arrange and execute the partitioned subgraphs in order. In most cases,
+        we execute one partitioned subgraph at a time by calling the DoFn BeamSubgraph().
+        However, when we encounter a remote op, we recursively call the PTransform
+        BeamGraph().
+    
+    Main assumption:
+        The parent graph has set up the placeholder values for the child graph.
+        This means that we need to setup the placeholder values (in PColl) for the main graph.
+    
+    Args:
+        pcoll: input PCollection, each unit contains {graph_name: {'computed tensor': value}}
+        op_to_partitioned_graph: {graph_name: {node_name: a graph_def}}
         op_to_execution_info: {graph_name: {'graph_placeholder_inputs': a list,
-                                                 'execution_relations': {node_name: a list of input_names}}}
+                                            'execution_relations': {node_name: a list of input_names}}}
+        op_to_remote_op_name_mapping: {graph_name: {remote op name: {placeholder name inside subgraph: input name}}}
+        op_to_output: {graph_name: output name inside a graph}
         graph_name: which graph am I currently executing
-        feed_dict: {graph_name: {remote op name: {placeholder name inside subgraph: input name}}}
-        op_to_outputs: {graph_name: a list of output names}
+        
+    Returns:
+        pcoll with the intermediate/end results.
     """
-    def _get_op_type(remote_graph_name):
+    def _get_op_type(name):
         for graph_name in op_to_partitioned_graph:
-            if remote_graph_name.startswith(graph_name):
+            if name.startswith(graph_name):
                 return graph_name
-            
     
     partitioned_graph = op_to_partitioned_graph[_get_op_type(graph_name)]
     execution_info = op_to_execution_info[_get_op_type(graph_name)]
@@ -320,14 +339,17 @@ def BeamGraph(pcoll, op_to_partitioned_graph, op_to_execution_info, graph_name, 
     while not relations.check_if_finished():
         
         def _check_node_remote_op(node):
-            return node.op == 'PyFunc'
+            return node.op == 'PyFunc'      # We used PyFunc to mimic remote op
         
         current_node_name = relations.find_next()
+        # In a subgraph, nodes other than the last node are placeholders for inputs
         current_node = partitioned_graph[current_node_name].node[-1]
-        print(current_node_name, _check_node_remote_op(current_node))
+        
+        # Prints the order of execution along the way
+        print(current_node_name, graph_name)
         
         if not _check_node_remote_op(current_node):
-            """We're executing a node!"""
+            """Execute a node"""
             graph_def = partitioned_graph[current_node_name]
             input_names = execution_relations[current_node_name]
             output_name = current_node_name
@@ -341,20 +363,29 @@ def BeamGraph(pcoll, op_to_partitioned_graph, op_to_execution_info, graph_name, 
                                                      graph_name)
             
         else:
-            """We're executing a remote op subgraph!"""                                        
+            """Execute a remote op, which is another graph"""                                        
             def add_tensor(element, old_graph, old_tensor, new_graph, new_tensor):
+                """Add tensor in pcoll: from a graph to another.
+                
+                The purpose is to preprocess/postprocess the pcoll before/after
+                    the recursive call.
+                    
+                Preprocess:
+                    Prepare for the placeholders nodes for the remote graph.
+                Postprocess:
+                    Transfer the result of the remote graph to the parent graph.
+                """
+#                element = copy.deepcopy(element)
                 if new_graph not in element:
                     element[new_graph] = {}
                 
-                element[new_graph][new_tensor] = element[old_graph][old_tensor]
-                print(type(element), len(element))
-                
+                element[new_graph][new_tensor] = element[old_graph][old_tensor]                
                 return element
             
             def remove_executed_graph_info(element, graph):
+#                element = copy.deepcopy(element)
                 del element[graph]
                 return element
-
                     
             def _import_name(name):
                 return 'import/%s:0' % name
@@ -365,286 +396,202 @@ def BeamGraph(pcoll, op_to_partitioned_graph, op_to_execution_info, graph_name, 
             
             input_names = execution_relations[current_node_name]
             remote_graph_placeholder_names = op_to_execution_info[_get_op_type(remote_graph_name)]['graph_placeholder_inputs']
-            placeholder_name_to_input_name = feed_dict[current_graph_name][remote_graph_name]
+            placeholder_name_to_input_name = op_to_remote_op_name_mapping[current_graph_name][remote_graph_name]
             
             assert set(input_names) == set(placeholder_name_to_input_name.values())
             assert set(remote_graph_placeholder_names) == set(placeholder_name_to_input_name.keys())
             
-            """Get the placeholders ready"""
+            """Get the placeholders ready for the remote graph"""
             for placeholder_name, input_name in placeholder_name_to_input_name.items():
                 count += 1
-                pcoll | str(count) >> beam.Map(print)
-                count += 1
                 pcoll = pcoll | str(count) >> beam.Map(add_tensor, 
-                                                         current_graph_name, 
-                                                         _import_name(input_name), 
-                                                         remote_graph_name, 
-                                                         _import_name(placeholder_name))
+                                                       current_graph_name, 
+                                                       _import_name(input_name), 
+                                                       remote_graph_name, 
+                                                       _import_name(placeholder_name))
             
-            """Recurse"""
+            """Recurse: execute the remote graph"""
             count += 1
-            pcoll = pcoll | str(count) >> BeamGraph(op_to_partitioned_graph, op_to_execution_info,
-                                                    remote_graph_name, feed_dict, op_to_outputs)
+            pcoll = pcoll | str(count) >> BeamGraph(op_to_partitioned_graph,
+                                                    op_to_execution_info,
+                                                    op_to_remote_op_name_mapping, 
+                                                    op_to_output, 
+                                                    remote_graph_name)
             
-            """Get the output"""
-            output_names = op_to_outputs[_get_op_type(remote_graph_name)]
-            for output_name in output_names:
-                count += 1
-                pcoll = pcoll | str(count) >> beam.Map(add_tensor,
-                                                         remote_graph_name,
-                                                         _import_name(output_name),
-                                                         current_graph_name,
-                                                         _import_name(remote_graph_name))
+            """Get the output.
+               Note that now we only support single output."""
+            output_name = op_to_output[_get_op_type(remote_graph_name)]
             
-#            count += 1
-#            pcoll = pcoll | str(count) >> beam.Map(remove_executed_graph_info,
-#                                                   remote_graph_name)
+            count += 1
+            pcoll = pcoll | str(count) >> beam.Map(add_tensor,
+                                                   remote_graph_name,
+                                                   _import_name(output_name),
+                                                   current_graph_name,
+                                                   _import_name(remote_graph_name))
             
-                    
-    return pcoll     # return is better than yield here, why?
-
+            count += 1
+            pcoll = pcoll | str(count) >> beam.Map(remove_executed_graph_info,
+                                                   remote_graph_name)
+            
+    return pcoll
 
 
 def TEST_Partitioning():
     op_to_filename = {'main': './graphdefs/main_graph.pb',
                       'remote_op_a': './graphdefs/graph_a.pb',
-                      'remote_op_b': './graphdefs/graph_b.pb'}
-    
-    partition = GraphPartition(op_to_filename)
-    
-    print(partition._check_remote_op('remote_op_a_3'))
-    partition._get_execution_info_for_all()
-    
-    print(partition._create_placeholder_node(tf.int16, None, 'test'))
-    partition._create_graphdefs_for_all()
-
-    partition._save_partitioned_results('.')
-    
+                      'remote_op_b': './graphdefs/graph_b.pb',
+                      }    
     
     partition = GraphPartition(op_to_filename)
     partition.partition()
+    partition.TEST()
     
+    
+def TEST_Relations():
+    op_to_filename = {'main': './graphdefs/main_graph.pb',
+                      'remote_op_a': './graphdefs/graph_a.pb',
+                      'remote_op_b': './graphdefs/graph_b.pb',
+                      }    
+    
+    partition = GraphPartition(op_to_filename)
+    partition.partition()
+
     test = Relations(partition.op_to_execution_info['remote_op_b']['execution_relations'],
                      partition.op_to_execution_info['remote_op_b']['graph_placeholder_inputs'])
-    test.check()
-
+    test.TEST()
     
-def TEST_BeamSubgraph():
-    def create_graphdef():
-        with tf.compat.v1.Session() as sess:
-            a = tf.compat.v1.placeholder(dtype=tf.float32, shape=None, name='a')
-            b = tf.compat.v1.placeholder(dtype=tf.float32, shape=None, name='b')
-            c = tf.add(a, b, name='c')
-            print(sess.graph.get_operations()[2].outputs[0].name)
-            return sess.graph_def
-        
-    options = beam.options.pipeline_options.PipelineOptions()
-    with beam.Pipeline(options=options) as p:
-        
-        graph_def = create_graphdef()
-        test = p | 'read' >> beam.Create([
-                {'main': {'import/a:0': 1.0, 'import/b:0': 2.0}},
-                {'main': {'import/a:0': 2.0, 'import/b:0': 3.0}},
-                 ])
-        
-        class getOutput(beam.DoFn):
-            def process(self, element, output):
-                return element[output]
-            
-        output = (
-                  test 
-                  | 'operate' >> beam.ParDo(BeamSubgraph(), graph_def, ['a', 'b'], 'c', 'main')
-#                  | 'get_output' >> beam.ParDo(getOutput(), 'import/c:0')
-                 )
-            
-        output | 'output' >> beam.io.WriteToText('./beam_experiment')
-        
-        result = p.run()
-        
 
-def TEST_BeamGraph_Graph_A():
+def TEST_Execute_Original_Model(graph_name, output_name, feed_dicts):
+    """Execute the original model.
+    
+    Args:
+        graph_name: the graph to execute
+        output_name: the name of the output inside the graph
+        feed_dicts: a list of {graph_name: {placeholder_input: value}}
+        
+    Returns:
+        A list of results
+    """
     op_to_filename = {'main': './graphdefs/main_graph.pb',
                       'remote_op_a': './graphdefs/graph_a.pb',
-                      'remote_op_b': './graphdefs/graph_b.pb'}
+                      'remote_op_b': './graphdefs/graph_b.pb'}    
+    test = GraphPartition(op_to_filename)
     
-    partition = GraphPartition(op_to_filename)
-    partition.partition()
+    results = []
+    for feed_dict in feed_dicts:
+        graph = test.op_to_graph[graph_name]
+        with tf.compat.v1.Session(graph=graph) as sess:
+                results.append(sess.run(output_name, feed_dict[graph_name]))
     
-    print(list(partition.op_to_graph.keys()))
-    
-    options = beam.options.pipeline_options.PipelineOptions()
-    with beam.Pipeline(options=options) as p:
-    
-        graph_name = 'remote_op_a'
-        
-        test = p | 'read' >> beam.Create([
-                {graph_name: {'import/ids_a:0': 3}},
-                {graph_name: {'import/ids_a:0': 10}},
-                 ])
-    
-        test | 'start' >> beam.Map(print)
-    
-        output = test | 'Graph' >> BeamGraph(partition.op_to_partitioned_graph, partition.op_to_execution_info, 
-                                             graph_name, {'remote_op_a': {}}, {'remote_op_a': {}})
-        
-        class PrintOne(beam.DoFn):
-            def process(self, element):
-                print(element)
-        
-        output | 'print' >> beam.ParDo(PrintOne())
-        output | 'output' >> beam.io.WriteToText('./beam_experiment')
-        
-        result = p.run()
-        result.wait_until_finish()
-        
+    return results
 
-def TEST_BeamGraph_B():
+
+def TEST_BeamPipeline(graph_name, output_name, feed_dicts):
+    """Execute the Beam Pipeline.
+    
+    Args:
+        graph_name: the graph to execute
+        output_name: the name of the output inside the graph
+        feed_dicts: a list of {graph_name: {placeholder_input: value}}
+        
+    Returns:
+        None. Save the result into a file.
+    """
     op_to_filename = {'main': './graphdefs/main_graph.pb',
                       'remote_op_a': './graphdefs/graph_a.pb',
-                      'remote_op_b': './graphdefs/graph_b.pb'}
+                      'remote_op_b': './graphdefs/graph_b.pb',
+                      }
+    test = GraphPartition(op_to_filename)
+    test.partition()
     
-    """Define your feed_dict again
-    {graph_name: {remote op name: {placeholder name inside subgraph: input name}}}"""
-    feed_dict = {'remote_op_b': {'remote_op_a': {'ids_a': 'FloorMod'},
-                                 'remote_op_a_1': {'ids_a': 'ids_b2'}}
-                 }
+    """Define your feed_dict again.
     
-    op_to_outputs = {'remote_op_b': ['Add_1'],
-                     'remote_op_a': ['embedding_lookup/Identity']}
+    These relations are stored inside PyFunc, but we don't have the access.
+    {graph_name: {remote op name: {placeholder name inside subgraph: input name}}}
+    """
+    op_to_remote_op_name_mapping = {'main': {'remote_op_a': {'ids_a': 'ids1'},
+                                             'remote_op_b': {'ids_b1': 'ids1', 'ids_b2': 'ids2'}},
+                                    'remote_op_b': {'remote_op_a': {'ids_a': 'FloorMod'},
+                                                    'remote_op_a_1': {'ids_a': 'ids_b2'}},
+                                    }
     
-    partition = GraphPartition(op_to_filename)
-    partition.partition()
+    """Define your output names"""
+    op_to_output = {'main': 'Mean',
+                    'remote_op_b': 'Add_1',
+                    'remote_op_a': 'embedding_lookup/Identity',
+                    }
     
     options = beam.options.pipeline_options.PipelineOptions()
     with beam.Pipeline(options=options) as p:
-    
-        graph_name = 'remote_op_b'
         
-        test = p | 'read' >> beam.Create([
-                {graph_name: {'import/ids_b1:0': 3, 'import/ids_b2:0': 3}},
-                {graph_name: {'import/ids_b1:0': 10, 'import/ids_b2:0': 10}},
-                 ])
-        
-        test | 'start' >> beam.Map(print)
+        inputs = p | 'read' >> beam.Create(feed_dicts)
     
-        output = test | 'Graph' >> BeamGraph(partition.op_to_partitioned_graph, partition.op_to_execution_info, 
-                                             graph_name, feed_dict, op_to_outputs)
+        outputs = inputs | 'Graph' >> BeamGraph(test.op_to_partitioned_graph, 
+                                                test.op_to_execution_info, 
+                                                op_to_remote_op_name_mapping, 
+                                                op_to_output, 
+                                                graph_name)
         
         class GetOutput(beam.DoFn):
             def process(self, element, graph_name, output_name):
                 yield element[graph_name][output_name]
             
-        output = output | beam.ParDo(GetOutput(), 'remote_op_b', 'import/Add_1:0')
-        output | 'output' >> beam.io.WriteToText('./beam_experiment')
-        
-        output | 'print' >> beam.Map(print)
-        
-        
+        outputs = outputs | beam.ParDo(GetOutput(), graph_name, output_name)
+        outputs | 'output' >> beam.io.WriteToText('./beam_experiment')
+                
         result = p.run()
         result.wait_until_finish()
         
 
-def TEST_BeamGraph_Main():
-    op_to_filename = {'main': './graphdefs/main_graph.pb',
-                      'remote_op_a': './graphdefs/graph_a.pb',
-                      'remote_op_b': './graphdefs/graph_b.pb'}
+def TEST_Stage1(graph_name):
+    feed_dicts_main_graph = [{'main': {'import/ids1:0': 3, 'import/ids2:0': 3}},
+                             {'main': {'import/ids1:0': 10, 'import/ids2:0': 10}}]
     
-    """Define your feed_dict again
-    {graph_name: {remote op name: {placeholder name inside subgraph: input name}}}"""
-    feed_dict = {'main': {'remote_op_a': {'ids_a': 'ids1'},
-                          'remote_op_b': {'ids_b1': 'ids1', 'ids_b2': 'ids2'}},
-                 'remote_op_b': {'remote_op_a': {'ids_a': 'FloorMod'},
-                                 'remote_op_a_1': {'ids_a': 'ids_b2'}}
-                 }
+    feed_dicts_graph_b = [{'remote_op_b': {'import/ids_b1:0': 3, 'import/ids_b2:0': 3}},
+                          {'remote_op_b': {'import/ids_b1:0': 10, 'import/ids_b2:0': 10}}]
     
-    op_to_outputs = {'main': ['Mean'],
-                     'remote_op_b': ['Add_1'],
-                     'remote_op_a': ['embedding_lookup/Identity']}
+    feed_dicts_graph_a = [{'remote_op_a': {'import/ids_a:0': 3}},
+                          {'remote_op_a': {'import/ids_a:0': 10}}]
     
-    partition = GraphPartition(op_to_filename)
-    partition.partition()
+    """The testcases are comprised of tests for each graph"""
+    testcases = {'main': {'output_name': 'import/Mean:0',
+                          'feed_dicts': feed_dicts_main_graph},
+                'remote_op_b': {'output_name': 'import/Add_1:0',
+                                'feed_dicts': feed_dicts_graph_b},               
+                'remote_op_a': {'output_name': 'import/embedding_lookup/Identity:0',
+                                'feed_dicts': feed_dicts_graph_a},
+                                }
     
-    print(list(partition.op_to_graph.keys()))
+    print('\nExecuting original model...')
+    result_original_model = TEST_Execute_Original_Model(graph_name, 
+                                                        testcases[graph_name]['output_name'],
+                                                        testcases[graph_name]['feed_dicts'])
     
-    options = beam.options.pipeline_options.PipelineOptions()
-    with beam.Pipeline(options=options) as p:
+    print('\nExecuting the Beam pipeline...')
+    TEST_BeamPipeline(graph_name, 
+                      testcases[graph_name]['output_name'],
+                      testcases[graph_name]['feed_dicts'])
     
-        graph_name = 'main'
-        
-        test = p | 'read' >> beam.Create([
-                {graph_name: {'import/ids1:0': 3, 'import/ids2:0': 3}},
-                {graph_name: {'import/ids1:0': 10, 'import/ids2:0': 10}},
-                 ])
-        
-        test | 'start' >> beam.Map(print)
+    import subprocess
+    result_beam_pipeline = subprocess.check_output(['cat', './beam_experiment-00000-of-00001'])
     
-        output = test | 'Graph' >> BeamGraph(partition.op_to_partitioned_graph, partition.op_to_execution_info, 
-                                             graph_name, feed_dict, op_to_outputs)
-        
-        class GetOutput(beam.DoFn):
-            def process(self, element, graph_name, output_name):
-                yield element[graph_name][output_name]
-            
-        output = output | beam.ParDo(GetOutput(), 'main', 'import/Mean:0')
-        
-        output | 'output' >> beam.io.WriteToText('./beam_experiment')
-        
-        output | 'print' >> beam.Map(print)
-        
-        
-        result = p.run()
-        result.wait_until_finish()
-
-
+    print('Results from the original model:', result_original_model)
+    print('\nResults from the beam pipeline:', result_beam_pipeline)
+    
         
 if __name__ == "__main__":
-    op_to_filename = {'main': './graphdefs/main_graph.pb',
-                      'remote_op_a': './graphdefs/graph_a.pb',
-                      'remote_op_b': './graphdefs/graph_b.pb'}
+    """Testcases:
     
-    tf.random.set_seed(5)
-    
-#    TEST_BeamGraph_Graph_A()
-    
-    # Calling graph_a
-#    tf.random.set_seed(5)
-#    test = GraphPartition(directory, op_to_graph)
-#    with tf.compat.v1.Session(graph=test.op_to_graph['remote_op_a']) as sess:
-#        print(sess.run('import/embedding_lookup/Identity:0', feed_dict={'import/ids_a:0': 3}))
-    
-    
-#    TEST_BeamGraph_B()
-    
-    # Calling main
-    test = GraphPartition(op_to_filename)
-    with tf.compat.v1.Session(graph=test.op_to_graph['remote_op_b']) as sess:
-        print(sess.run('import/Add_1:0', feed_dict={'import/ids_b1:0': 3, 'import/ids_b2:0': 3}))
-#    
-    
-    TEST_BeamGraph_Main()
-    
-    # Calling main
-#    test = GraphPartition(directory, op_to_graph)
-    with tf.compat.v1.Session(graph=test.op_to_graph['main']) as sess:
-        print(sess.run('import/remote_op_b:0', feed_dict={'import/ids1:0': 3, 'import/ids2:0': 3}))
-    
-    
-    with tf.compat.v1.Session(graph=test.op_to_graph['main']) as sess:
-        print(sess.run('import/Mean:0', feed_dict={'import/ids1:0': 3, 'import/ids2:0': 3}))
-        print(sess.run('import/Mean:0', feed_dict={'import/ids1:0': 10, 'import/ids2:0': 10}))
+    TEST_Partitioning(): test the partitioning functionality
+    TEST_Relations(): test the relations functionality
+    TEST_Stage1(graph_name): compare the original model with the beam pipeline
+    """
+    graph_names = ['main', 'remote_op_a', 'remote_op_b']
+    TEST_Stage1('main')
     
     
     
-
-
-
-
-
-
-
-
-
-
+    
 
 
 
