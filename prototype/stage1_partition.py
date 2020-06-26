@@ -27,6 +27,11 @@ import numpy as np
 from tensorflow.core.framework import graph_pb2
 from tensorflow.core.framework import node_def_pb2
 import apache_beam as beam
+import copy
+
+"""Problem: since we're using PyFunc to mimic remote ops, we need to include
+            the file that declares the graphs. Otherwise, the PyFunc ops
+            cannot be found/loaded."""
 import stage1_graph
 
     
@@ -195,22 +200,30 @@ class GraphPartition(object):
 class BeamSubgraph(beam.DoFn):    
     
     def process(self, element, graph_def, input_names, output_name, graph_name):
-        """
-        Input:
-            element: a unit of PCollection, {graph_name: tensors ready to use}
+        """Executes the smallest unit: one subgraph.
+        
+        Takes in the graph_def of a subgraph, loads the subgraph into a graph,
+            executes the subgraph, and stores the result into element.
+        
+        Definition of element: a unit of PCollection. In our use case, element
+            stores the intermediate results for computation.
+        
+        Args:
+            element: a unit of PCollection, {graph_name: {'a computed node': value}}
             graph_def: side-input, graph_def of a partitioned graph
-            input_names: side-input
-            output_name: side-input
-            graph_name: which graph am I belonging to
-        Return:
-            element := element + output tensor
+            input_names: side-input, inputs of the subgraph (can be empty)
+            output_name: side-input, output of the subgrapg
+            graph_name: which graph am I belonging to, ex: 'remote_op_a'
+            
+        Returns:
+            Latest element with the recently computed node added.
         """
         self.graph_def = graph_def
         self.output_name = self._convert_name(output_name)
-        self.inputs = {}
+        self.feed_dict = {}
         for input_name in input_names:
             input_name = self._convert_name(input_name)
-            self.inputs[input_name] = element[graph_name][input_name]
+            self.feed_dict[input_name] = element[graph_name][input_name]
         
         self._setup()
         output = self._run_inference()
@@ -218,22 +231,19 @@ class BeamSubgraph(beam.DoFn):
 #        element = copy.deepcopy(element)
         element[graph_name][self.output_name] = output[0]   # The first and the only output tensor
         
-        yield element        # Need yield to return an iterable
-    
+        yield element
     
     def _convert_name(self, string):
         return 'import/%s:0' % string
     
-        
     def _setup(self):
         self.graph = tf.Graph()
         with self.graph.as_default():
             tf.import_graph_def(self.graph_def)
         
-        
     def _run_inference(self):
         with tf.compat.v1.Session(graph=self.graph) as sess:
-            return sess.run([self.output_name], feed_dict=self.inputs)
+            return sess.run([self.output_name], feed_dict=self.feed_dict)
 
 
 class Relations:  
