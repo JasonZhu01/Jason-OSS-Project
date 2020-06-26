@@ -206,7 +206,7 @@ class BeamSubgraph(beam.DoFn):
             executes the subgraph, and stores the result into element.
         
         Definition of element: a unit of PCollection. In our use case, element
-            stores the intermediate results for computation.
+            stores the intermediate results in TF graph execution.
         
         Args:
             element: a unit of PCollection, {graph_name: {'a computed node': value}}
@@ -247,34 +247,47 @@ class BeamSubgraph(beam.DoFn):
 
 
 class Relations:  
+    """A class that outputs the order of execution.
     
-    def __init__(self, relations, inputs=set([])):
+    Methods:
+        check_if_finished(): check if we completed the execution of the entire graph
+        find_next(): find the next thing to execute, returns None if finished
+        TEST(): for debugging use only
+        
+    Attributes:
+        relations: execution relations of a graph, {node_name: inputs}
+        processed: a set that contains nodes that have been processed
+        to_be_processed: a set that contains nodes that haven't been processed
+    """
+    
+    def __init__(self, relations, inputs=[]):
         self.relations = relations
         self.processed = set(inputs)
         self.to_be_processed = set(relations.keys())
         for processed in inputs:
+            # Assume that inputs have been processed
             if processed in self.to_be_processed:
                 self.to_be_processed.remove(processed)
         
     def check_if_finished(self):
-        return self.to_be_processed == set([])
+        return not self.to_be_processed
 
     def find_next(self):
         if not self.check_if_finished():
             for elem in self.to_be_processed:
-                # If inputs were satisfied
-                if set(self.relations[elem]).issubset(self.processed):
+                # If all the inputs were processed
+                inputs = set(self.relations[elem])
+                if inputs.issubset(self.processed):
                     self.to_be_processed.remove(elem)
                     self.processed.add(elem)
                     return elem
         return None
     
-    def check(self):
+    def TEST(self):
         print(self.relations, self.to_be_processed, self.processed)
         for i in range(len(self.to_be_processed)):
             print(self.find_next())
             
-
 
 @beam.ptransform_fn
 def BeamGraph(pcoll, op_to_partitioned_graph, op_to_execution_info, graph_name, feed_dict, op_to_outputs):
