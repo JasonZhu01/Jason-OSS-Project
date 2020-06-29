@@ -56,8 +56,7 @@ class GraphPartition(object):
         op_to_graph: {graph name: graph}
         op_to_execution_info: {graph name: {'graph_placeholder_inputs': a list of node names},
                                             'execution relations': {node name: a list of node names}}
-        op_to_partitioned_graph:
-    
+        op_to_partitioned_graph: {graph_name: {node name: graph_def}}
     """
     
     def __init__(self, op_to_filepath):
@@ -160,7 +159,7 @@ class GraphPartition(object):
         for input_node in current_node.inputs:
             graph_def.node.append(self._create_placeholder_node(dtype=input_node.dtype,
                                                                 shape=None,
-                                                                name=self._remove_prefix_postfix(input_node.name)))  
+                                                                name=self._remove_prefix_postfix(input_node.name))) 
         graph_def.node.append(node)
         return graph_def
                 
@@ -209,20 +208,20 @@ class BeamSubgraph(beam.DoFn):
             stores the intermediate results in TF graph execution.
         
         Args:
-            element: a unit of PCollection, {graph_name: {'a computed node': value}}
+            element: a unit of PCollection, {graph_name: {computed node: value}}
             graph_def: side-input, graph_def of a partitioned graph
             input_names: side-input, inputs of the subgraph (can be empty)
-            output_name: side-input, output of the subgrapg
+            output_name: side-input, output of the subgraph
             graph_name: which graph am I belonging to, ex: 'remote_op_a'
             
         Returns:
             Latest element with the recently computed node added.
         """
         self.graph_def = graph_def
-        self.output_name = self._convert_name(output_name)
+        self.output_name = self._import_name(output_name)
         self.feed_dict = {}
         for input_name in input_names:
-            input_name = self._convert_name(input_name)
+            input_name = self._import_name(input_name)
             self.feed_dict[input_name] = element[graph_name][input_name]
         
         self._setup()
@@ -233,7 +232,7 @@ class BeamSubgraph(beam.DoFn):
         
         yield element
     
-    def _convert_name(self, string):
+    def _import_name(self, string):
         return 'import/%s:0' % string
     
     def _setup(self):
@@ -250,7 +249,7 @@ class Relations:
     """A class that outputs the order of execution.
     
     Methods:
-        check_if_finished(): check if we completed the execution of the entire graph
+        check_if_finished(): check if we've completed the execution of the entire graph
         find_next(): find the next thing to execute, returns None if finished
         TEST(): for debugging use only
         
