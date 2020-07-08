@@ -32,7 +32,7 @@ import copy
 """Problem: since we're using PyFunc to mimic remote ops, we need to include
             the file that declares the graphs. Otherwise, the PyFunc ops
             cannot be found/loaded."""
-import stage1_graph
+import stage1_harder_graph
 
     
 class GraphPartition(object):
@@ -152,7 +152,7 @@ class GraphPartition(object):
         graph_def.versions.CopyFrom(versions)
         graph_def.library.CopyFrom(library)
         
-        node = self._remove_colocated_attr(node) 
+        node = self._remove_colocated_attr(node)
         
         current_node = graph.get_operation_by_name('import/%s' % (node.name))
         # Here, we add the input nodes as placeholder nodes into the subgraph
@@ -480,7 +480,7 @@ def TEST_Execute_Original_Model(graph_name, output_name, feed_dicts):
     for feed_dict in feed_dicts:
         graph = test.op_to_graph[graph_name]
         with tf.compat.v1.Session(graph=graph) as sess:
-                results.append(sess.run(output_name, feed_dict[graph_name]))
+            results.append(sess.run(output_name, feed_dict[graph_name]))
     
     return results
 
@@ -509,13 +509,14 @@ def TEST_BeamPipeline(graph_name, output_name, feed_dicts):
     {graph_name: {remote op name: {placeholder name inside subgraph: input name}}}
     """
     op_to_remote_op_name_mapping = {'main': {'remote_op_a': {'ids_a': 'ids1'},
-                                             'remote_op_b': {'ids_b1': 'ids1', 'ids_b2': 'ids2'}},
+                                             'remote_op_b': {'ids_b1': 'ids1', 'ids_b2': 'ids2'},
+                                             'remote_op_a_1': {'ids_a': 'FloorMod'}},
                                     'remote_op_b': {'remote_op_a': {'ids_a': 'FloorMod'},
                                                     'remote_op_a_1': {'ids_a': 'ids_b2'}},
                                     }
     
     """Define your output names"""
-    op_to_output = {'main': 'Mean',
+    op_to_output = {'main': 'Add', # Instead of Mean
                     'remote_op_b': 'Add_1',
                     'remote_op_a': 'embedding_lookup/Identity',
                     }
@@ -553,7 +554,7 @@ def TEST_Stage1(graph_name):
                           {'remote_op_a': {'import/ids_a:0': 10}}]
     
     """The testcases are comprised of tests for each graph"""
-    testcases = {'main': {'output_name': 'import/Mean:0',
+    testcases = {'main': {'output_name': 'import/Add:0',
                           'feed_dicts': feed_dicts_main_graph},
                 'remote_op_b': {'output_name': 'import/Add_1:0',
                                 'feed_dicts': feed_dicts_graph_b},               
@@ -587,7 +588,6 @@ if __name__ == "__main__":
     """
     graph_names = ['main', 'remote_op_a', 'remote_op_b']
     TEST_Stage1('main')
-    
     
     
     
