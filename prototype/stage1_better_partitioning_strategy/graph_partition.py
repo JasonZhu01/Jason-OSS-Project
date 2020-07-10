@@ -4,6 +4,10 @@ A library for graph partitioning.
 The current implementation aims for two goals:
     1. Maximal subgraphs
     2. Avoid repeated work (in the case of skip connections)
+    
+Definition:
+    1. "Op" refers to the graph name. 
+        In our example: {'main', 'remote_op_b', 'remote_op_a'}.
 
 @author: jzhunybj
 """
@@ -13,13 +17,23 @@ from tensorflow.core.framework import graph_pb2
 
 
 def get_op_to_graph_def(op_to_filepath):
-    op_to_graph_def = {}
-    for op, filepath in op_to_filepath.items():
-        op_to_graph_def[op] = get_graph_def(filepath)
+    """Import graph_defs.
+    
+    The current implementation loads graph_defs from the memory."""
+    op_to_graph_def = {op: get_graph_def(filepath) for op, filepath
+                       in op_to_filepath.items()}
     return op_to_graph_def
 
 
+def get_graph_def(filepath):
+    graph_def = graph_pb2.GraphDef()
+    with tf.compat.v1.gfile.FastGFile(filepath, 'rb') as f:
+        graph_def.ParseFromString(f.read())
+    return graph_def
+
+
 def partition_all_graphs(op_to_graph_def, op_to_outputs):
+    """The main method to call."""
     op_to_execution_bundles = {}
     for op in op_to_graph_def:
         execution_bundles = partition_one_graph(op_to_graph_def[op],
@@ -29,6 +43,27 @@ def partition_all_graphs(op_to_graph_def, op_to_outputs):
 
 
 def partition_one_graph(graph_def, outputs):
+    """Partition a graph_def.
+    
+    Arguments:
+        graph_def: a GraphDef proto
+        outputs: a set of node names for the current graph
+    
+    Variables:
+        graph: a tf.Graph instance
+        node_name_to_node_def: {node name: a NodeDef}
+        node_name_to_input_names: {node name: a list of input names}
+        remote_op_relations: {remote op name: a list of immediate remote op children}
+    
+    Returns:
+        execution_bundles: a list of bundles, each bundle contains:
+                           {'subgraph': a GraphDef,
+                            'inputs': a set of node names,
+                            'outputs': a set of node names,
+                            'is_remote_op': a Boolean,
+                            'body_nodes': not important,
+                            'skip_connections': not important}
+    """
     graph = get_graph(graph_def)
     node_name_to_node_def = get_node_name_to_node_def(graph_def)
     node_name_to_input_names = get_node_name_to_input_names(graph_def)
@@ -46,14 +81,6 @@ def partition_one_graph(graph_def, outputs):
     return execution_bundles
 
 
-
-def get_graph_def(filepath):
-    graph_def = graph_pb2.GraphDef()
-    with tf.compat.v1.gfile.FastGFile(filepath, 'rb') as f:
-        graph_def.ParseFromString(f.read())
-    return graph_def
-
-
 def get_graph(graph_def):
     temp = tf.Graph()
     with temp.as_default():
@@ -62,19 +89,17 @@ def get_graph(graph_def):
 
 
 def get_node_name_to_node_def(graph_def):
-    node_name_to_node_def = {node.name: node for node in graph_def.node}
-    return node_name_to_node_def
+    return {node.name: node for node in graph_def.node}
 
 
 def get_node_name_to_input_names(graph_def):
-    node_name_to_input_names = {node.name: list(node.input) for node in graph_def.node}
-    return node_name_to_input_names
+    return {node.name: list(node.input) for node in graph_def.node}
 
 
 def get_remote_op_relations(graph_def, node_name_to_node_def, node_name_to_input_names):
     """Get {remote op: a list of immediate remote op children},
       
-    These remote op children must be executed before the remote op.
+    These remote op children must be executed before executing the remote op.
     """
     remote_op_relations = {}
     
@@ -84,20 +109,12 @@ def get_remote_op_relations(graph_def, node_name_to_node_def, node_name_to_input
                                                                         node_name_to_node_def,
                                                                         node_name_to_input_names)
     return remote_op_relations
- 
-
-def check_placeholder_op(node):
-    return node.op == "Placeholder"
 
 
-def check_remote_op(node):
-    return node.op == "PyFunc"
-
-
-def bfs_get_remote_op_children(node_name, node_name_to_node_def, node_name_to_input_names):
-    """Given a remote op, find the immediate remote op children"""
-    queue = [node_name]
-    visited = set([node_name])
+def bfs_get_remote_op_children(remote_op_name, node_name_to_node_def, node_name_to_input_names):
+    """Find the immediate remote op children for a remote op"""
+    queue = [remote_op_name]
+    visited = set([remote_op_name])
     children_remote_op = []
     
     while queue:
@@ -117,31 +134,108 @@ def bfs_get_remote_op_children(node_name, node_name_to_node_def, node_name_to_in
     return children_remote_op
 
 
-def create_placeholder_node(dtype, shape, name):
-    temp = tf.Graph()
-    with temp.as_default():
-        placeholder = tf.compat.v1.placeholder(dtype=dtype, shape=shape, name=name)
-        return temp.as_graph_def().node[0]      # The first and the only node  
+def check_placeholder_op(node):
+    return node.op == "Placeholder"
 
 
-def create_placeholder_node_from_existing_node(node, graph):
-    operation = graph.get_operation_by_name('import/%s' % (node.name))
-    dtype = operation.outputs[0].dtype
-    return create_placeholder_node(dtype=dtype,
-                                   shape=None,
-                                   name=node.name)
+def check_remote_op(node):
+    return node.op == "PyFunc"
 
 
-def get_inputs_from_subgraph(subgraph):
-    inputs = set([node.name for node in subgraph.node
-                  if check_placeholder_op(node)])
-    return inputs
-
+def get_execution_bundles(graph_def,
+                          graph,
+                          node_name_to_node_def,
+                          node_name_to_input_names,
+                          remote_op_relations,
+                          graph_outputs):
+    """Generate the execution_bundles for a graph.
     
-def get_regular_nodes_from_subgraph(subgraph):
-    regular_nodes = set([node.name for node in subgraph.node
-                         if not check_placeholder_op(node)])
-    return regular_nodes
+    We divide a graph into two types of layers:
+        1. A subgraph layer -- consists of regular nodes.
+        2. A remote op layer -- consists of remote ops.
+    
+    As you might have noticed, the remote ops need to be treated differently
+    inside a beam pipeline. Here, we also handle them with different functions
+    -- partition_one_subgraph_layer() for a subgraph layer and
+       partition_one_remote_op_layer() for a remote op layer.
+       
+    The details of the arguments and the return value can be referrenced at
+    partition_one_graph()'s DocString.
+    """
+    execution_bundles = []
+    previous_layers_visited = set([])
+    order = Relations(remote_op_relations)
+    
+    while not order.check_if_finished():
+        remote_ops_one_layer = order.get_next_layer()
+        
+        # Handle one subgraph layer
+        layer_output_node_names = get_layer_output_node_names(remote_ops_one_layer,
+                                                              node_name_to_node_def,
+                                                              node_name_to_input_names)
+        
+        if layer_output_node_names:
+            subgraph_bundle = partition_one_subgraph_layer(previous_layers_visited, 
+                                                           graph_def,
+                                                           graph,
+                                                           layer_output_node_names, 
+                                                           node_name_to_node_def,
+                                                           node_name_to_input_names)
+            execution_bundles.append(subgraph_bundle)
+            previous_layers_visited = previous_layers_visited.union(subgraph_bundle['body_nodes'])
+        
+        # Handle one remote op layer
+        remote_op_bundles = partition_one_remote_op_layer(remote_ops_one_layer, node_name_to_input_names)
+        execution_bundles.extend(remote_op_bundles)
+
+    # Handle the last subgraph layer
+    output_node_names = set(graph_outputs)
+    subgraph_bundle = partition_one_subgraph_layer(previous_layers_visited, 
+                                                   graph_def,
+                                                   graph,
+                                                   output_node_names, 
+                                                   node_name_to_node_def,
+                                                   node_name_to_input_names)
+    execution_bundles.append(subgraph_bundle)
+    previous_layers_visited = previous_layers_visited.union(subgraph_bundle['body_nodes'])
+    
+    # TODO: Think about ways to make this readable!
+    # Handle skip connections
+    for current_bundle_index in range(len(execution_bundles)):
+        current_bundle = execution_bundles[current_bundle_index]
+        
+        if not current_bundle['is_remote_op']:
+            for skip_node_name in current_bundle['skip_connections']:
+                for previous_bundle_index in range(current_bundle_index):
+                    previous_bundle = execution_bundles[previous_bundle_index]
+                    
+                    if not previous_bundle['is_remote_op']:
+                        if skip_node_name in previous_bundle['body_nodes']:
+                            previous_bundle['outputs'].add(skip_node_name)
+                            current_bundle['inputs'].add(skip_node_name)
+                            
+                            node = node_name_to_node_def[skip_node_name]
+                            placeholder_node = create_placeholder_node_from_existing_node(node, graph)
+                            current_bundle['subgraph'].node.append(placeholder_node)
+
+    TEST_subgraph_validity(execution_bundles)
+    TEST_regular_node_name_coverage(graph_def, previous_layers_visited)   
+
+    return execution_bundles
+
+
+def get_layer_output_node_names(remote_ops_one_layer, 
+                                node_name_to_node_def, 
+                                node_name_to_input_names):
+    output_node_names = set([])
+    
+    for remote_op in remote_ops_one_layer:
+        for input_node_name in node_name_to_input_names[remote_op]:
+            input_node = node_name_to_node_def[input_node_name]
+            if not check_placeholder_op(input_node):
+                output_node_names.add(input_node_name)
+                
+    return output_node_names
 
 
 def partition_one_subgraph_layer(previous_layers_visited,
@@ -211,7 +305,7 @@ def partition_one_subgraph_layer(previous_layers_visited,
             'body_nodes': get_regular_nodes_from_subgraph(subgraph), 
             'is_remote_op': False,
             'skip_connections': skip_connections}
-    
+        
 
 def partition_one_remote_op_layer(remote_op_names, node_name_to_input_names):
     """Construct structures for remote op"""
@@ -228,77 +322,31 @@ def partition_one_remote_op_layer(remote_op_names, node_name_to_input_names):
     return list_of_bundles
 
 
-def get_execution_bundles(graph_def,
-                          graph,
-                          node_name_to_node_def,
-                          node_name_to_input_names,
-                          remote_op_relations,
-                          graph_outputs):
-    """"""
-    order = Relations(remote_op_relations)
-    execution_bundles = []
-    previous_layers_visited = set([])
-    
-    while not order.check_if_finished():
-        # Handle one subgraph layer
-        remote_ops_one_layer = order.get_next_layer()
-        output_node_names = set([])
-        for remote_op in remote_ops_one_layer:
-            for input_node_name in node_name_to_input_names[remote_op]:
-                input_node = node_name_to_node_def[input_node_name]
-                if not check_placeholder_op(input_node):
-                    output_node_names.add(input_node_name)
-        
-        if output_node_names:
-            subgraph_bundle = partition_one_subgraph_layer(previous_layers_visited, 
-                                                           graph_def,
-                                                           graph,
-                                                           output_node_names, 
-                                                           node_name_to_node_def,
-                                                           node_name_to_input_names)
-            execution_bundles.append(subgraph_bundle)
-            previous_layers_visited = previous_layers_visited.union(subgraph_bundle['body_nodes'])
-        
-        
-        # Handle one remote op layer
-        remote_op_bundles = partition_one_remote_op_layer(remote_ops_one_layer, node_name_to_input_names)
-        execution_bundles.extend(remote_op_bundles)
-        
-        
-    # Handle the last subgraph layer
-    output_node_names = set(graph_outputs)
-    subgraph_bundle = partition_one_subgraph_layer(previous_layers_visited, 
-                                                   graph_def,
-                                                   graph,
-                                                   output_node_names, 
-                                                   node_name_to_node_def,
-                                                   node_name_to_input_names)
-    execution_bundles.append(subgraph_bundle)
-    previous_layers_visited = previous_layers_visited.union(subgraph_bundle['body_nodes'])
-    
-    # Handle skip connections
-    for current_bundle_index in range(len(execution_bundles)):
-        current_bundle = execution_bundles[current_bundle_index]
-        
-        if not current_bundle['is_remote_op']:
-            for skip_node_name in current_bundle['skip_connections']:
-                for previous_bundle_index in range(current_bundle_index):
-                    previous_bundle = execution_bundles[previous_bundle_index]
-                    
-                    if not previous_bundle['is_remote_op']:
-                        if skip_node_name in previous_bundle['body_nodes']:
-                            previous_bundle['outputs'].add(skip_node_name)
-                            current_bundle['inputs'].add(skip_node_name)
-                            subgraph = current_bundle['subgraph']
-                            node = node_name_to_node_def[skip_node_name]
-                            placeholder_node = create_placeholder_node_from_existing_node(node, graph)
-                            subgraph.node.append(placeholder_node)
+def create_placeholder_node(dtype, shape, name):
+    temp = tf.Graph()
+    with temp.as_default():
+        placeholder = tf.compat.v1.placeholder(dtype=dtype, shape=shape, name=name)
+        return temp.as_graph_def().node[0]      # The first and the only node  
+
+
+def create_placeholder_node_from_existing_node(node, graph):
+    operation = graph.get_operation_by_name('import/%s' % (node.name))
+    dtype = operation.outputs[0].dtype
+    return create_placeholder_node(dtype=dtype,
+                                   shape=None,
+                                   name=node.name)
+
+
+def get_inputs_from_subgraph(subgraph):
+    inputs = set([node.name for node in subgraph.node
+                  if check_placeholder_op(node)])
+    return inputs
 
     
-    TEST_subgraph_validity(execution_bundles)
-    TEST_regular_node_name_coverage(graph_def, previous_layers_visited)   
-
-    return execution_bundles
+def get_regular_nodes_from_subgraph(subgraph):
+    regular_nodes = set([node.name for node in subgraph.node
+                         if not check_placeholder_op(node)])
+    return regular_nodes
 
 
 def TEST_subgraph_validity(execution_bundles):
@@ -316,7 +364,6 @@ def TEST_regular_node_name_coverage(graph_def, graph_visited):
             node_names.add(node.name)
     
     print("We've visited all the regular nodes inside a graph:", graph_visited == node_names)
-
 
 
 class Relations(object):
