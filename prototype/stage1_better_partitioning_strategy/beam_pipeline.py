@@ -102,7 +102,7 @@ def ExecuteOneGraph(pcoll,
     count = 0
     
     for bundle in execution_bundles:
-        print(bundle['set_of_node_names'])
+        print(bundle['body_nodes'])
         
         if not bundle['is_remote_op']:
             """Executing a subgraph"""

@@ -1,12 +1,13 @@
 """
-
+Test cases.
 
 @author: jzhunybj
 """
 
-import partition
+import graph_partition
 import beam_pipeline
 import runner
+import subprocess
 
 
 def TEST_Partitioning():
@@ -19,10 +20,10 @@ def TEST_Partitioning():
                     'remote_op_a': ['embedding_lookup/Identity'],
                     }
     
-    test = partition.GraphPartition(op_to_filename, op_to_outputs)
-    test.partition()
+    op_to_graph_def = graph_partition.get_op_to_graph_def(op_to_filename)
+    op_to_execution_bundles = graph_partition.partition_all_graphs(op_to_graph_def, op_to_outputs)
     
-    for op, execution_bundles in test.op_to_execution_bundles.items():
+    for op, execution_bundles in op_to_execution_bundles.items():
         print(op)
         
         for execution_bundle in execution_bundles:
@@ -65,15 +66,19 @@ def TEST(graph_name):
                         'remote_op_a': feed_dicts_graph_a}
     
     
+    result_original_model = runner.run_original_model(graph_name, 
+                                                      op_to_filename, 
+                                                      op_to_outputs, 
+                                                      op_to_feed_dicts)
+    
     runner.run_partition_and_beam(graph_name, 
                                   op_to_filename, 
                                   op_to_outputs, 
                                   op_to_feed_dicts, 
                                   op_to_remote_op_name_mapping)
-    
-    
-    import subprocess
     result_beam_pipeline = subprocess.check_output(['cat', './beam_experiment-00000-of-00001'])
+    
+    print('Results from the original model:', result_original_model)
     print('\nResults from the beam pipeline:', result_beam_pipeline)
     
     
