@@ -142,7 +142,7 @@ def ExecuteOneGraph(pcoll,
             remote_graph_name = list(bundle['outputs'])[0]      # only one remote op output
             
             """Preprocess"""
-            placeholder_name_to_input_name = op_to_remote_op_name_mapping[current_graph_name][remote_graph_name]
+            placeholder_name_to_input_name = op_to_remote_op_name_mapping[_get_op_type(current_graph_name)][remote_graph_name]
             for placeholder_name, input_name in placeholder_name_to_input_name.items():
                 count += 1
                 pcoll = pcoll | str(count) >> beam.Map(copy_tensor,

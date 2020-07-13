@@ -14,7 +14,7 @@ import graph_partition
 """Problem: since we're using PyFunc to mimic remote ops, we need to include
             the file that declares the graphs. Otherwise, the PyFunc ops
             cannot be found/loaded."""
-import create_graph
+import create_complex_graph
 
 
 def import_name(name):

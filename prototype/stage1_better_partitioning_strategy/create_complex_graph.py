@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Generate an example consists of {'main', 'remote_op_a', 'remote_op_b'}
+
 @author: jzhunybj
 """
 
@@ -74,17 +75,37 @@ main_graph = tf.Graph()
 with main_graph.as_default():
     ids1 = tf.compat.v1.placeholder(dtype=tf.int32, name='ids1')
     ids2 = tf.compat.v1.placeholder(dtype=tf.int32, name='ids2')
-    res_b = remote_op_b(ids1, ids2)
-    concat_1 = tf.concat([remote_op_a(ids1), res_b], axis=0)
-    sum_1 = tf.reduce_mean(concat_1)
+    casted_ids1 = tf.cast(ids1, dtype=tf.float32)
+    casted_ids2 = tf.cast(ids2, dtype=tf.float32)
     
-    rounded = tf.math.round(sum_1)
-    mod = tf.math.floormod(rounded, N)
-    res_a2 = remote_op_a(mod)
+    remote_a0 = remote_op_a(ids1)
+    remote_b0 = remote_op_b(ids1, ids2)
     
-    sum_2 = tf.reduce_mean(res_a2)
-    main_result = tf.add(sum_2, sum_1)
-
+    left_upper_concat = tf.concat([remote_a0, remote_b0], axis=0)
+    left_upper_sum = tf.reduce_mean(left_upper_concat)
+    
+    right_upper_sum = tf.reduce_mean(remote_b0)
+    right_upper_mul = tf.multiply(right_upper_sum, casted_ids2)
+    right_upper_add = tf.add(right_upper_mul, left_upper_sum)
+    right_upper_round = tf.math.round(right_upper_mul)
+    right_upper_floormod = tf.math.floormod(right_upper_round, N)
+    
+    left_upper_add = tf.add_n([left_upper_sum, casted_ids1, right_upper_add])
+    left_upper_round = tf.math.round(left_upper_add)
+    left_upper_floormod = tf.math.floormod(left_upper_round, N)
+    
+    remote_a1 = remote_op_a(left_upper_floormod)
+    remote_b1 = remote_op_b(left_upper_floormod, right_upper_floormod)
+    
+    left_lower_sum = tf.reduce_mean(remote_a1)
+    
+    right_lower_sum = tf.reduce_mean(remote_b1)
+    right_lower_mul = tf.multiply(casted_ids2, right_lower_sum)
+    right_lower_div = tf.divide(right_upper_add, right_lower_mul)
+    
+    main_result = tf.add_n([left_lower_sum, right_lower_div, right_lower_sum, right_upper_sum, 
+                            tf.cast(left_upper_floormod, dtype=tf.float32)])
+    
 
 def main():
     with create_session(main_graph) as sess:
@@ -92,18 +113,10 @@ def main():
         input2 = np.random.uniform(0, N, (10))
         print(sess.run([main_result], feed_dict={ids1: 3, ids2: 3}))
         
-    tf.io.write_graph(graph_a.as_graph_def(), './graphdefs', 'graph_a.pb', as_text=False)
-    tf.io.write_graph(graph_b.as_graph_def(), './graphdefs', 'graph_b.pb', as_text=False)
-    tf.io.write_graph(main_graph.as_graph_def(), './graphdefs', 'main_graph.pb', as_text=False)
+    tf.io.write_graph(graph_a.as_graph_def(), './complex_graphdefs', 'graph_a.pb', as_text=False)
+    tf.io.write_graph(graph_b.as_graph_def(), './complex_graphdefs', 'graph_b.pb', as_text=False)
+    tf.io.write_graph(main_graph.as_graph_def(), './complex_graphdefs', 'main_graph.pb', as_text=False)
 
     
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
