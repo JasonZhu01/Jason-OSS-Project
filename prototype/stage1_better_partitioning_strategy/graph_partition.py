@@ -1,16 +1,38 @@
 """
 A library for graph partitioning.
 
-The current implementation aims for two criterias:
+The current implementation targets two goals:
     1. Maximal subgraphs
-    2. Avoid repeated work when running beam
+    2. Avoid repeated work when running subgraphs in beam
     
 Definition:
     1. "op" refers to a graph name. 
         In our example: op = {'main', 'remote_op_b', 'remote_op_a'}.
 
-    2. "execution_bundles" refers to an abstraction passed to the beam pipeline.
-        Each bundle contains things like subgraph, inputs, outputs, and is_remote_op.
+    2. "execution_bundles" refers to a structure passed to the beam pipeline.
+    
+    <--toward inputs                         toward outputs-->
+        --------------------------------------------------
+        |          |          |          |               |
+        | Bundle 1 | Bundle 2 | Bundle 3 | ......        |
+        |          |          |          |               |
+        --------------------------------------------------
+                 /              \
+                /                \
+               / ---------------- \
+                 |   Subgraph   |
+                 ----------------
+                 |    Inputs    |
+                 ----------------
+                 |   Outputs    |
+                 ----------------
+                 | is_remote_op |
+                 ----------------
+                 
+Key Assumptions/Restrictions for this implementation:
+    1. Inputs should be GraphDefs.
+    2. Operating on TensorFlow Directed Acyclic Graphs (DAG).
+    3. Only one output per node/op.
 
 @author: jzhunybj
 """
@@ -19,7 +41,7 @@ import tensorflow as tf
 from tensorflow.core.framework import graph_pb2
 
 
-"""I/O"""
+"""Supporting I/O"""
 def get_op_to_graph_def(op_to_filepath):
     """Import graph_defs.
     
@@ -36,7 +58,7 @@ def get_graph_def(filepath):
     return graph_def
 
 
-"""Partioning"""
+"""Partitioning"""
 def partition_all_graphs(op_to_graph_def, op_to_outputs):
     """The main method to call."""
     op_to_execution_bundles = {}
@@ -83,11 +105,18 @@ def partition_one_graph(graph_def, outputs):
                                               node_name_to_input_names,
                                               remote_op_relations,
                                               outputs)
+    # DEBUG
+    _debug_print_execution_bundles(execution_bundles)
     
-    for execution_bundle in execution_bundles:
-        print(execution_bundle['body_nodes'])
-        
     return execution_bundles
+
+
+def _debug_print_execution_bundles(execution_bundles):
+    for execution_bundle in execution_bundles:
+        print('\nIs the current bundle a remote op?', execution_bundle['is_remote_op'])
+        print('Inputs:', execution_bundle['inputs'])
+        print('Outputs:', execution_bundle['outputs'])
+        print('Body nodes:', execution_bundle['body_nodes'])
 
 
 def get_graph(graph_def):
@@ -159,25 +188,21 @@ def get_execution_bundles(graph_def,
                           graph_outputs):
     """Generate the execution_bundles for a graph.
     
-    We divide a graph into two types of layers:
+    In Beam, remote ops need to be handled differently than the regular nodes,
+    so we divide a graph into two types of layers:
         1. A subgraph layer -- consists of regular nodes.
         2. A remote op layer -- consists of remote ops.
-    
-    As you might have noticed, the remote ops need to be treated differently
-    inside a beam pipeline. Here, we handle them with different functions
-    -- partition_one_subgraph_layer() for a subgraph layer and
-       partition_one_remote_op_layer() for a remote op layer.
        
     Algorithm:
         while the remote op layers haven't been fully processed:
             1. Get the next remote op layer.
             2. Get the input names of the remote op layer, which are equivilant
-            to the output names of the previous subgraph layer.
+               to the output names of the previous subgraph layer.
             3. Handle the previous subgraph layer.
             4. Handle the current remote op layer.
         Finally, handle the subgraph layer with graph_outputs.
        
-    The details of the arguments and the return value can be referred from
+    For the descriptions of arguments and return values, referred to
     partition_one_graph()'s DocString.
     """
     execution_bundles = []
@@ -226,10 +251,6 @@ def get_execution_bundles(graph_def,
                                                      node_name_to_node_def)
     execution_bundles.append(subgraph_bundle)
     previous_layers_visited = previous_layers_visited.union(subgraph_bundle['body_nodes'])
-    
-
-    TEST_subgraph_validity(execution_bundles)
-    TEST_regular_node_name_coverage(graph_def, previous_layers_visited)   
 
     return execution_bundles
 
@@ -246,29 +267,12 @@ def get_subgraph_layer_output_node_names(remote_ops_one_layer,
         for input_node_name in node_name_to_input_names[remote_op]:
             input_node = node_name_to_node_def[input_node_name]
             
+            # Assumption: graph inputs (placeholders) are pre-loaded before 
+            #             executing the graph. This happens in beam_pipeline.
             if not check_placeholder_op(input_node):
                 output_node_names.add(input_node_name)
                 
     return output_node_names
-
-
-def handle_nodes_from_other_layers(current_bundle, execution_bundles, graph, node_name_to_node_def):
-    """Handle nodes that are from other layers.
-    
-    Add it to other layer's output, add it to current layer's input,
-    and add a placeholder node to current layer."""
-    for node_name in current_bundle['nodes_from_other_layers']:
-        for previous_bundle in execution_bundles:
-            
-            if node_name in previous_bundle['body_nodes']:
-                previous_bundle['outputs'].add(node_name)
-                current_bundle['inputs'].add(node_name)
-                
-                node = node_name_to_node_def[node_name]
-                placeholder = create_placeholder_node_from_existing_node(node, graph)
-                current_bundle['subgraph'].node.append(placeholder)
-                
-    return current_bundle
 
 
 def partition_one_subgraph_layer(previous_layers_visited,
@@ -279,8 +283,8 @@ def partition_one_subgraph_layer(previous_layers_visited,
                                  node_name_to_input_names):
     """Perform a modified BFS for graph partitioning.
     
-    Expand from the outputs, until the stop condition: remote op, placeholder,
-    visited already in this graph, or visited already from the previous graph.
+    Expand from the outputs, until one of the stopping condition: remote op, 
+    placeholder, visited before in this layer, or visited before in the previous layers.
     
     Arguments:
         previous_layers_visited: a set of nodes
@@ -312,7 +316,6 @@ def partition_one_subgraph_layer(previous_layers_visited,
         current_node = node_name_to_node_def[current_node_name]
         del queue[0]
         
-        """Three types of ops: regular, remote, and placeholder input"""
         if check_remote_op(current_node) or check_placeholder_op(current_node):
             # Remote op or placeholder input will always be prepared.
             if current_node_name not in current_layer_visited:
@@ -321,8 +324,8 @@ def partition_one_subgraph_layer(previous_layers_visited,
                 
                 current_layer_visited.add(current_node_name)   
         else:
-            # Regular op may be a skip connection and not prepared,
-            #   so we need to find them and do something later.
+            # Regular op may be an intermediate node from other graphs and 
+            # not prepared, so we need to find them and do something later.
             if current_node_name in previous_layers_visited:
                 nodes_from_other_layers.add(current_node_name)
             
@@ -338,10 +341,29 @@ def partition_one_subgraph_layer(previous_layers_visited,
             'body_nodes': get_regular_nodes_from_subgraph(subgraph), 
             'is_remote_op': False,
             'nodes_from_other_layers': nodes_from_other_layers}
+    
+
+def handle_nodes_from_other_layers(current_bundle, execution_bundles, graph, node_name_to_node_def):
+    """Handle nodes that are from other layers.
+    
+    Add it to other layer's output, add it to current layer's input,
+    and add a placeholder node to current layer."""
+    for node_name in current_bundle['nodes_from_other_layers']:
+        for previous_bundle in execution_bundles:
+            
+            if node_name in previous_bundle['body_nodes']:
+                previous_bundle['outputs'].add(node_name)
+                current_bundle['inputs'].add(node_name)
+                
+                node = node_name_to_node_def[node_name]
+                placeholder = create_placeholder_node_from_existing_node(node, graph)
+                current_bundle['subgraph'].node.append(placeholder)
+                
+    return current_bundle
         
 
 def partition_one_remote_op_layer(remote_op_names, node_name_to_input_names):
-    """Construct structures for remote op"""
+    """Construct bundle for remote ops"""
     list_of_bundles = []
     for remote_op_name in remote_op_names:
         bundle = {'subgraph': None, 
@@ -371,8 +393,7 @@ def create_placeholder_node_from_existing_node(node, graph):
 
 
 def get_inputs_from_subgraph(subgraph):
-    inputs = set([node.name for node in subgraph.node
-                  if check_placeholder_op(node)])
+    inputs = set([node.name for node in subgraph.node if check_placeholder_op(node)])
     return inputs
 
     
@@ -382,27 +403,10 @@ def get_regular_nodes_from_subgraph(subgraph):
     return regular_nodes
 
 
-def TEST_subgraph_validity(execution_bundles):
-    for execution_bundle in execution_bundles:        
-        if not execution_bundle['is_remote_op']:
-            graph = tf.Graph()
-            with graph.as_default():
-                tf.import_graph_def(execution_bundle['subgraph'])
-
-
-def TEST_regular_node_name_coverage(graph_def, graph_visited):
-    node_names = set([])
-    for node in graph_def.node:
-        if not check_remote_op(node) and not check_placeholder_op(node):
-            node_names.add(node.name)
-    
-    print("We've visited all the regular nodes inside a graph:", graph_visited == node_names)
-
-
 class Relations(object):
-    """A class that outputs remote op layers.
+    """A class that outputs remote op layers (custom topological sort).
     
-    What is a layer? A layer is a list of nodes whose inputs have been generated."""
+    What is a layer? A layer is a set of nodes that are ready to execute."""
     def __init__(self, relations):
         self.relations = relations
         self.processed = set([])
@@ -412,12 +416,12 @@ class Relations(object):
         return not self.to_be_processed
     
     def get_next_layer(self):
-        layer_nodes = []
+        layer_nodes = set([])
         
         for node in self.to_be_processed:
             node_inputs = set(self.relations[node])
             if node_inputs.issubset(self.processed):
-                layer_nodes.append(node)
+                layer_nodes.add(node)
                 
         for node in layer_nodes:
             self.to_be_processed.remove(node)
@@ -425,13 +429,9 @@ class Relations(object):
         
         return layer_nodes
     
-    def TEST(self):
+    def _debug_print_layers(self):
         while not self.check_if_finished():
             print(self.get_next_layer())
             
-    def TEST_hard(self):
-        """Draw the graph!"""
-        remote_op_relations = {'a1': [], 'a2': [], 'b1': ['a1'], 'b2': ['a1', 'a2'],
-                          'c1': ['b1'], 'c2': ['b1', 'a1', 'b2', 'a2']}
-        relations = Relations(remote_op_relations)
-        relations.TEST()
+            
+            
